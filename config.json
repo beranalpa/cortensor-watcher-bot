@@ -1,0 +1,30 @@
+{
+  "containers": [
+    "cortensor-1",
+    "cortensor-2",
+    "cortensor-3",
+    // ... Continue this pattern for all your nodes (e.g., up to "cortensor-25")
+    "cortensor-25"
+  ],
+  "node_addresses": {
+    "cortensor-1": "0xYOUR_NODE_ADDRESS_1",
+    "cortensor-2": "0xYOUR_NODE_ADDRESS_2",
+    "cortensor-3": "0xYOUR_NODE_ADDRESS_3",
+    // ... Ensure every container above has a corresponding node address here ...
+    "cortensor-25": "0xYOUR_NODE_ADDRESS_25"
+  },
+  "tail_lines": 500,
+  "check_interval_seconds": 2.5,
+  "grace_period_seconds": 30,
+  "stats_api_url": "[https://lb-be-5.cortensor.network/network-stats-tasks](https://lb-be-5.cortensor.network/network-stats-tasks)",
+  "watch_tx_for_containers": [
+    "cortensor-1",
+    "cortensor-2",
+    "cortensor-3",
+    // ... Also list all containers whose transactions you want to monitor ...
+    "cortensor-25"
+  ],
+  "tx_timeout_seconds": 45,
+  "stagnation_alert_enabled": true,
+  "stagnation_threshold_minutes": 30
+}

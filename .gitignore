@@ -1,0 +1,14 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# Application-specific logs
+watcher.log
+restart_logs/
+
+# IDE / Editor specific files (opsional)
+.vscode/
+.idea/
