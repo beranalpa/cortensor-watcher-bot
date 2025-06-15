@@ -179,17 +179,18 @@ To stop the bot gracefully, press `Ctrl+C` in the terminal where it is running. 
 ### Telegram Commands
 You can interact with the bot directly from your Telegram chat.
 
-- `<b>/help</b>`
+- <b>/help</b>
   Displays a list of all available commands.
-- `<b>/status</b>`
+- <b>/status</b>
   Shows the current operational status, including how many containers are being monitored and the stagnation alert settings.
-- `<b>/stagnation on</b>`
+- <b>/stagnation on</b>
   Enables the network stagnation alert.
-- `<b>/stagnation off</b>`
+- <b>/stagnation off</b>
   Disables the network stagnation alert.
-- `<b>/stagnation_timer &lt;minutes&gt;</b>`
+- <b>/stagnation_timer &lt;minutes&gt;</b>
   Sets how long the majority state must be unchanged before a stagnation alert is triggered.
-  _Example: `/stagnation_timer 60` sets the timer to one hour._
+  _Example: /stagnation_timer 60
+  sets the timer to one hour._
 
 ## License
 This project is licensed under the MIT License. See the `LICENSE` file for details.
