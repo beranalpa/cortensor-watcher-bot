@@ -3,9 +3,7 @@
   <img src="https://avatars.githubusercontent.com/u/174224856?s=200&v=4" alt="Project Banner">
 <h1>Cortensor Watcher Bot</h1>
 
-<p>
-An automated monitoring and remediation tool designed to ensure the health, performance, and uptime of a fleet of Cortensor nodes running in Docker. This bot proactively detects common issues and can be controlled remotely via Telegram.
-</p>
+This project is an enhanced and feature-rich automated monitoring tool, originally inspired by the work of **scerb**. It is designed to ensure the health, performance, and uptime of a fleet of Cortensor nodes running in Docker. This version adds features like a professional project structure, Telegram-based remote control, and enhanced stagnation alerts.
 
 <p>
     <a href="https://github.com/your-username/cortensor-watcher-bot/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
@@ -191,6 +189,12 @@ You can interact with the bot directly from your Telegram chat.
   Sets how long the majority state must be unchanged before a stagnation alert is triggered.
   _Example: /stagnation_timer 60
   sets the timer to one hour._
+
+## Acknowledgements
+
+This project was heavily inspired by the original work on node monitoring scripts by **scerb**. A big thank you for providing the foundational concepts and logic that made this enhanced version possible.
+
+- You can find the project that inspired this one here: **[scerb/node_watch](https://github.com/scerb/node_watch/)**
 
 ## License
 This project is licensed under the MIT License. See the `LICENSE` file for details.
