@@ -1,10 +1,12 @@
-version: "3.8"
+FROM python:3.11-slim
 
-services:
-  watcher:
-    build: .
-    container_name: cortensor-watcher-bot
-    restart: unless-stopped
-    volumes:
-      # Mount Docker socket untuk memanage kontainer lain
-      - /var/run/docker.sock:/var/run/docker.sock
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY ./app /app/app
+COPY main.py .
+
+# Jalankan bot saat kontainer dimulai
+CMD ["python3", "main.py"]
