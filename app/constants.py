@@ -1,11 +1,6 @@
 import re
 from pathlib import Path
 
-# --- Official Repository URL ---
-# IMPORTANT: Verify this is the correct official repository URL for the node software.
-OFFICIAL_CORTENSOR_REPO_URL = "https://github.com/cortensor/cortensor-node.git"
-
-
 # --- Filesystem Constants ---
 LOG_DIR = Path("restart_logs")
 WATCHER_LOG_FILE = Path("watcher.log")
@@ -33,7 +28,7 @@ MSG_WATCHER_ERROR = "🔥 <b>WATCHER CRITICAL ERROR</b> 🔥\nThe monitoring scr
 # --- Stagnation & Command Messages (using HTML) ---
 MSG_STAGNATION_ALERT = "⚠️ <b>Network Stagnation Alert</b> ⚠️\n\nMajority state <code>{pair}</code> has not changed for over {duration} minutes.\nThis might indicate an issue with the Oracle or RPC."
 MSG_CMD_RESPONSE = "✅ <b>Command Executed</b>\n\n{response}"
-MSG_CMD_ERROR = "❌ <b>Action Failed</b>\n\n{error}"  # <-- INI BARIS YANG HILANG
+MSG_CMD_ERROR = "❌ <b>Action Failed</b>\n\n{error}"
 MSG_CMD_UNKNOWN = "❓ <b>Unknown Command</b>\n\nI didn't recognize that command. Send /help to see available commands."
 MSG_CMD_HELP = """<b>Cortensor Watcher Bot Commands</b>
 
@@ -42,10 +37,6 @@ MSG_CMD_HELP = """<b>Cortensor Watcher Bot Commands</b>
 <code>/stop &lt;container_name&gt;</code>
 <code>/restart &lt;container_name&gt;</code>
 <code>/logs &lt;container_name&gt; [lines]</code> - Shows last 20 lines (or specified number).
-
-<b>Upgrade Management:</b>
-<code>/upgrade &lt;container_name&gt; &lt;branch_name&gt;</code>
-<i>Upgrades the node from the official Cortensor repository using the specified branch.</i>
 
 <b>Watcher Settings:</b>
 <code>/status</code> - View current settings.
