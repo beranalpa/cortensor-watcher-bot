@@ -82,41 +82,67 @@ class NodeMonitor:
             self.container_states[cid]["id_lag_start_time"] = None
 
     def _check_reputation(self) -> None:
-        if not self.config.get("reputation_check_enabled"): return
+        """
+        Performs the reputation health check for each node.
+        """
+        if not self.config.get("reputation_check_enabled"):
+            return
+
         logging.info("Performing Reputation Health Check...")
         base_url = self.config.get("reputation_api_base_url", "").rstrip('/')
         window = self.config.get("reputation_check_window", 20)
         threshold = self.config.get("reputation_failure_threshold", 5)
+        
         node_addresses = self.config.get("node_addresses", {})
         for cid, address in node_addresses.items():
-            api_url = f"{base_url}/{address.lower()}"
+            # --- MODIFIED LINE: Removed .lower() ---
+            # Use the address exactly as provided in config.json
+            api_url = f"{base_url}/{address}"
+            
             try:
                 container = self.client.containers.get(cid)
-                if not self.container_states[cid].get("warmed_up", False): continue
+                if not self.container_states[cid].get("warmed_up", False):
+                    continue
+
                 response = requests.get(api_url, timeout=10)
                 if response.status_code == 404:
-                    logging.warning(f"Reputation API for '{cid}' returned 404. URL: {api_url}")
+                    logging.warning(f"Reputation API for '{cid}' returned status 404. URL: {api_url}")
                     continue
-                response.raise_for_status()
+                response.raise_for_status() # This will catch the 500 error and others
+                
                 data = response.json()
+                
                 for stage in ["precommit", "commit"]:
                     stage_data = data.get(stage, {})
-                    all_ts = stage_data.get("all_timestamps", [])
-                    success_ts = stage_data.get("success_timestamps", [])
-                    if not all_ts: continue
-                    recent = set(all_ts[-window:])
-                    successful = set(success_ts)
-                    failed_count = len(recent - successful)
-                    if failed_count > 0:
-                        logging.info(f"Reputation Check for '{cid}' ({stage}): Found {failed_count} failed tasks in last {len(recent)}.")
-                    if failed_count >= threshold:
-                        details = f"Node had {failed_count} failed {stage} tasks in the last {len(recent)} attempts."
+                    all_timestamps = stage_data.get("all_timestamps", [])
+                    success_timestamps = stage_data.get("success_timestamps", [])
+
+                    if not all_timestamps:
+                        continue
+
+                    recent_tasks = set(all_timestamps[-window:])
+                    successful_tasks = set(success_timestamps)
+                    
+                    failed_tasks = recent_tasks - successful_tasks
+                    failure_count = len(failed_tasks)
+
+                    if failure_count > 0:
+                         logging.info(f"Reputation Check for '{cid}' ({stage}): Found {failure_count} failed tasks in the last {len(recent_tasks)} tasks.")
+
+                    if failure_count >= threshold:
+                        details = f"Node had {failure_count} failed {stage} tasks in the last {len(recent_tasks)} attempts."
                         self._restart_container(container, "Reputation Failure", details)
                         break
+
+            except requests.RequestException as e:
+                logging.error(f"Error during reputation check for '{cid}'. URL: {api_url}. Error: {e}")
+            except (docker.errors.NotFound, KeyError):
+                 logging.error(f"Container '{cid}' not found while checking reputation.")
             except Exception as e:
-                logging.error(f"Error during reputation check for '{cid}': {e}")
+                logging.error(f"An unexpected error during reputation check for '{cid}': {e}", exc_info=True)
 
     def run(self) -> None:
+        # This method and others below have no changes
         self.notifier.send_watcher_start_message()
         while True:
             try:
@@ -128,7 +154,9 @@ class NodeMonitor:
                     state["warmed_up"] = is_warmed_up
                 if self.config.get("reputation_check_enabled"):
                     self._check_reputation()
+                
                 all_statuses = self._get_all_container_statuses()
+                
                 running_nodes = {
                     cid: status for cid, status in all_statuses.items()
                     if status.get("is_running") and "session_id" in status
@@ -146,7 +174,7 @@ class NodeMonitor:
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                logging.critical(f"An unhandled error occurred in the main loop: {e}", exc_info=True)
+                logging.critical(f"An unhandled error in the main loop: {e}", exc_info=True)
                 self.notifier.send_watcher_error_message(e)
                 time.sleep(10)
 
@@ -243,79 +271,48 @@ class NodeMonitor:
         command = parts[0].lower()
         logging.info(f"Received command from Telegram: {text}")
         if command in ["/start", "/stop", "/restart", "/logs"]:
-            if len(parts) < 2:
-                self.notifier.send_command_response(f"Error: Missing container name.\nUsage: <code>{command} &lt;container_name&gt;</code>")
-                return
+            if len(parts) < 2: self.notifier.send_command_response(f"Error: Missing container name.\nUsage: <code>{command} &lt;container_name&gt;</code>"); return
             cid = parts[1]
             try:
                 container = self.client.containers.get(cid)
-                if command == "/start":
-                    container.start()
-                    self.notifier.send_command_response(f"Container <code>{cid}</code> started.")
-                elif command == "/stop":
-                    container.stop()
-                    self.notifier.send_command_response(f"Container <code>{cid}</code> stopped.")
-                elif command == "/restart":
-                    container.restart()
-                    self.notifier.send_command_response(f"Container <code>{cid}</code> restarted.")
+                if command == "/start": container.start(); self.notifier.send_command_response(f"Container <code>{cid}</code> started.")
+                elif command == "/stop": container.stop(); self.notifier.send_command_response(f"Container <code>{cid}</code> stopped.")
+                elif command == "/restart": container.restart(); self.notifier.send_command_response(f"Container <code>{cid}</code> restarted.")
                 elif command == "/logs":
                     num_lines_str = parts[2] if len(parts) > 2 else "20"
-                    if not num_lines_str.isdigit():
-                        self.notifier.send_command_response("Error: Line count must be a number.")
-                        return
-                    num_lines = int(num_lines_str)
-                    logs = container.logs(tail=num_lines).decode("utf-8", "ignore")
-                    if len(logs) > 4000:
-                        logs = "...\n" + logs[-4000:]
+                    if not num_lines_str.isdigit(): self.notifier.send_command_response("Error: Line count must be a number."); return
+                    num_lines, logs = int(num_lines_str), container.logs(tail=int(num_lines_str)).decode("utf-8", "ignore")
+                    if len(logs) > 4000: logs = "...\n" + logs[-4000:]
                     self.notifier.send_command_response(f"Last {num_lines} lines of logs for <code>{cid}</code>:\n<pre>{logs}</pre>")
-            except docker.errors.NotFound:
-                self.notifier.send_command_response(f"Error: Container <code>{cid}</code> not found.")
-            except Exception as e:
-                self.notifier.send_command_response(MSG_CMD_ERROR.format(error=str(e)))
+            except docker.errors.NotFound: self.notifier.send_command_response(f"Error: Container <code>{cid}</code> not found.")
+            except Exception as e: self.notifier.send_command_response(MSG_CMD_ERROR.format(error=str(e)))
             return
+        
         response = ""
         if command == "/stagnation":
             if len(parts) > 1:
                 sub_cmd = parts[1].lower()
-                if sub_cmd == "on":
-                    self.config["stagnation_alert_enabled"] = True
-                    response = "Stagnation alerts have been ENABLED."
-                elif sub_cmd == "off":
-                    self.config["stagnation_alert_enabled"] = False
-                    response = "Stagnation alerts have been DISABLED."
-                else:
-                    response = f"Unknown sub-command '<code>{sub_cmd}</code>'. Use 'on' or 'off'."
-            else:
-                response = "Missing sub-command. Use '<code>/stagnation on</code>' or '<code>/stagnation off</code>'."
+                if sub_cmd == "on": self.config["stagnation_alert_enabled"] = True; response = "Stagnation alerts have been ENABLED."
+                elif sub_cmd == "off": self.config["stagnation_alert_enabled"] = False; response = "Stagnation alerts have been DISABLED."
+                else: response = f"Unknown sub-command '<code>{sub_cmd}</code>'. Use 'on' or 'off'."
+            else: response = "Missing sub-command. Use '<code>/stagnation on</code>' or '<code>/stagnation off</code>'."
         elif command == "/stagnation_timer":
             if len(parts) > 1:
                 try:
                     minutes = int(parts[1])
-                    if minutes > 0:
-                        self.config["stagnation_threshold_minutes"] = minutes
-                        response = f"Stagnation timer set to {minutes} minutes."
-                    else:
-                        response = "Please provide a positive number of minutes."
-                except ValueError:
-                    response = "Invalid number. Please provide an integer for minutes."
-            else:
-                response = "Missing argument. Usage: <code>/stagnation_timer &lt;minutes&gt;</code>"
+                    if minutes > 0: self.config["stagnation_threshold_minutes"] = minutes; response = f"Stagnation timer set to {minutes} minutes."
+                    else: response = "Please provide a positive number of minutes."
+                except ValueError: response = "Invalid number. Please provide an integer for minutes."
+            else: response = "Missing argument. Usage: <code>/stagnation_timer &lt;minutes&gt;</code>"
         elif command == "/status":
-            stagnation_status = "ENABLED" if self.config.get("stagnation_alert_enabled") else "DISABLED"
-            stagnation_time = self.config.get("stagnation_threshold_minutes")
-            num_containers = len(self.config.get("containers", []))
+            stagnation_status, stagnation_time, num_containers = "ENABLED" if self.config.get("stagnation_alert_enabled") else "DISABLED", self.config.get("stagnation_threshold_minutes"), len(self.config.get("containers", []))
             response = (f"<b>Watcher Status</b>\n- Monitoring {num_containers} containers.\n- Stagnation Alerts: <b>{stagnation_status}</b>\n- Stagnation Threshold: <b>{stagnation_time} minutes</b>")
-        elif command == "/help":
-            self.notifier.send_help_response()
-            return
-        else:
-            self.notifier.send_unknown_command_response()
-            return
+        elif command == "/help": self.notifier.send_help_response(); return
+        else: self.notifier.send_unknown_command_response(); return
         self.notifier.send_command_response(response)
-
+    
     def _check_for_majority_stagnation(self, now: datetime, majority_pair: Tuple[int, int]) -> None:
-        if not self.config.get("stagnation_alert_enabled", False):
-            return
+        if not self.config.get("stagnation_alert_enabled", False): return
         if self.last_seen_majority_pair != majority_pair:
             logging.info(f"Majority has progressed to {majority_pair}. Resetting stagnation timer.")
             self.last_seen_majority_pair, self.majority_stagnation_start_time, self.alert_sent_for_stagnant_pair = majority_pair, None, None
