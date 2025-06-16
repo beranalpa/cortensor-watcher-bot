@@ -17,7 +17,6 @@ from app.constants import (LOG_DIR, MSG_CMD_ERROR, MSG_CMD_HELP,
                            PATTERN_TRACEBACK, RE_LOG_STATE, WARMUP_SECONDS,
                            WATCHER_LOG_FILE)
 
-
 class NodeMonitor:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -29,7 +28,12 @@ class NodeMonitor:
         )
         self.notifier.start_update_listener(self._handle_telegram_command)
         self.container_states: Dict[str, Dict[str, Any]] = {
-            cid: {"state_deviation_start_time": None, "id_lag_start_time": None, "warmed_up": False}
+            cid: {
+                "state_deviation_start_time": None,
+                "id_lag_start_time": None,
+                "warmed_up": False,
+                "reputation_cooldown_until": None
+            }
             for cid in self.config["containers"]
         }
         self.last_seen_majority_pair: Optional[Tuple[int, int]] = None
@@ -71,78 +75,67 @@ class NodeMonitor:
             cid=cid, reason=reason, details=details,
             timestamp=now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
         )
+        
+        if cid in self.container_states:
+            state_info = self.container_states[cid]
+            state_info["state_deviation_start_time"] = None
+            state_info["id_lag_start_time"] = None
+            if reason == "Reputation Failure":
+                cooldown_minutes = self.config.get("reputation_restart_cooldown_minutes", 30)
+                cooldown_end_time = now_utc + timedelta(minutes=cooldown_minutes)
+                state_info["reputation_cooldown_until"] = cooldown_end_time
+                logging.info(f"DEBUG: Setting cooldown for '{cid}' until {cooldown_end_time.isoformat()}")
         try:
             container.restart(timeout=30)
             logging.info(f"Restart command sent successfully to '{cid}'.")
         except Exception as e:
             logging.error(f"Failed to restart container '{cid}': {e}")
             self.notifier.send_restart_failure_alert(cid)
-        if cid in self.container_states:
-            self.container_states[cid]["state_deviation_start_time"] = None
-            self.container_states[cid]["id_lag_start_time"] = None
-
+            
     def _check_reputation(self) -> None:
-        """
-        Performs the reputation health check for each node.
-        """
-        if not self.config.get("reputation_check_enabled"):
-            return
-
+        if not self.config.get("reputation_check_enabled"): return
         logging.info("Performing Reputation Health Check...")
         base_url = self.config.get("reputation_api_base_url", "").rstrip('/')
         window = self.config.get("reputation_check_window", 20)
         threshold = self.config.get("reputation_failure_threshold", 5)
-        
         node_addresses = self.config.get("node_addresses", {})
+        now = datetime.now(timezone.utc)
         for cid, address in node_addresses.items():
-            # --- MODIFIED LINE: Removed .lower() ---
-            # Use the address exactly as provided in config.json
+            state_info = self.container_states.get(cid)
+            if not state_info: continue
+            cooldown_until = state_info.get("reputation_cooldown_until")
+            if cooldown_until:
+                is_in_cooldown = now < cooldown_until
+                logging.info(f"DEBUG: Checking cooldown for '{cid}'. Now: {now.isoformat()}. Cooldown until: {cooldown_until.isoformat()}. In cooldown: {is_in_cooldown}")
+            if cooldown_until and now < cooldown_until:
+                logging.info(f"Skipping reputation check for '{cid}', it is in cooldown.")
+                continue
             api_url = f"{base_url}/{address}"
-            
             try:
                 container = self.client.containers.get(cid)
-                if not self.container_states[cid].get("warmed_up", False):
-                    continue
-
+                if not state_info.get("warmed_up", False): continue
                 response = requests.get(api_url, timeout=10)
                 if response.status_code == 404:
-                    logging.warning(f"Reputation API for '{cid}' returned status 404. URL: {api_url}")
+                    logging.warning(f"Reputation API for '{cid}' returned 404. URL: {api_url}")
                     continue
-                response.raise_for_status() # This will catch the 500 error and others
-                
+                response.raise_for_status()
                 data = response.json()
-                
                 for stage in ["precommit", "commit"]:
                     stage_data = data.get(stage, {})
-                    all_timestamps = stage_data.get("all_timestamps", [])
-                    success_timestamps = stage_data.get("success_timestamps", [])
-
-                    if not all_timestamps:
-                        continue
-
-                    recent_tasks = set(all_timestamps[-window:])
-                    successful_tasks = set(success_timestamps)
-                    
-                    failed_tasks = recent_tasks - successful_tasks
-                    failure_count = len(failed_tasks)
-
-                    if failure_count > 0:
-                         logging.info(f"Reputation Check for '{cid}' ({stage}): Found {failure_count} failed tasks in the last {len(recent_tasks)} tasks.")
-
-                    if failure_count >= threshold:
-                        details = f"Node had {failure_count} failed {stage} tasks in the last {len(recent_tasks)} attempts."
+                    all_ts, success_ts = stage_data.get("all_timestamps", []), stage_data.get("success_timestamps", [])
+                    if not all_ts: continue
+                    recent, successful = set(all_ts[-window:]), set(success_ts)
+                    failed_count = len(recent - successful)
+                    if failed_count > 0:
+                        logging.info(f"Reputation Check for '{cid}' ({stage}): Found {failed_count} failed tasks in last {len(recent)}.")
+                    if failed_count >= threshold:
+                        details = f"Node had {failed_count} failed {stage} tasks in the last {len(recent)} attempts."
                         self._restart_container(container, "Reputation Failure", details)
                         break
-
-            except requests.RequestException as e:
-                logging.error(f"Error during reputation check for '{cid}'. URL: {api_url}. Error: {e}")
-            except (docker.errors.NotFound, KeyError):
-                 logging.error(f"Container '{cid}' not found while checking reputation.")
             except Exception as e:
-                logging.error(f"An unexpected error during reputation check for '{cid}': {e}", exc_info=True)
+                logging.error(f"Error during reputation check for '{cid}': {e}")
 
     def run(self) -> None:
-        # This method and others below have no changes
         self.notifier.send_watcher_start_message()
         while True:
             try:
@@ -152,15 +145,9 @@ class NodeMonitor:
                 is_warmed_up = (now_utc - self.start_time).total_seconds() >= WARMUP_SECONDS
                 for state in self.container_states.values():
                     state["warmed_up"] = is_warmed_up
-                if self.config.get("reputation_check_enabled"):
-                    self._check_reputation()
-                
+                if self.config.get("reputation_check_enabled"): self._check_reputation()
                 all_statuses = self._get_all_container_statuses()
-                
-                running_nodes = {
-                    cid: status for cid, status in all_statuses.items()
-                    if status.get("is_running") and "session_id" in status
-                }
+                running_nodes = {cid: status for cid, status in all_statuses.items() if status.get("is_running") and "session_id" in status}
                 if len(running_nodes) < 2:
                     logging.warning("Not enough nodes reporting status to determine a majority.")
                 else:
@@ -179,31 +166,24 @@ class NodeMonitor:
                 time.sleep(10)
 
     def _get_all_container_statuses(self) -> Dict[str, Dict[str, Any]]:
-        statuses: Dict[str, Dict[str, Any]] = {}
+        statuses = {}
         for cid in self.config["containers"]:
             try:
                 container = self.client.containers.get(cid)
-                status_data: Dict[str, Any] = {"container": container, "is_running": container.status == "running", "docker_status": container.status}
-                if not status_data["is_running"]:
-                    statuses[cid] = status_data
-                    continue
+                status_data = {"container": container, "is_running": container.status == "running", "docker_status": container.status}
+                if not status_data["is_running"]: statuses[cid] = status_data; continue
                 log_lines = container.logs(tail=self.config["tail_lines"]).decode("utf-8", "ignore").splitlines()
                 if self.container_states[cid]["warmed_up"]:
                     if any(PATTERN_TRACEBACK in ln for ln in log_lines):
-                        details = "A Python 'Traceback' was detected in the node's log output."
-                        self._restart_container(container, "Python Traceback", details)
+                        self._restart_container(container, "Python Traceback", "A Python 'Traceback' was detected.")
                         continue
                     ping_failures = sum(1 for ln in log_lines[-52:] if PATTERN_PING_FAIL in ln)
                     if ping_failures >= 2:
-                        details = f"{ping_failures} instances of '{PATTERN_PING_FAIL}' found in the last 52 log lines."
-                        self._restart_container(container, "Ping Failure", details)
+                        self._restart_container(container, "Ping Failure", f"{ping_failures} instances of '{PATTERN_PING_FAIL}' found.")
                         continue
                 for ln in reversed(log_lines):
                     m = RE_LOG_STATE.search(ln)
-                    if m:
-                        status_data["session_id"] = int(m.group(1))
-                        status_data["state"] = int(m.group(2))
-                        break
+                    if m: status_data["session_id"], status_data["state"] = int(m.group(1)), int(m.group(2)); break
                 statuses[cid] = status_data
             except docker.errors.NotFound:
                 logging.error(f"Container '{cid}' not found.")
@@ -221,8 +201,7 @@ class NodeMonitor:
             if not status.get("is_running") or container is None:
                 logging.warning(f"Container '{cid}' is not running (Status: {docker_status}).")
                 if majority_state == 6 and container:
-                    details = f"Node status was '{docker_status}' while majority concluded the session (State 6)."
-                    self._restart_container(container, "Inactive Node", details)
+                    self._restart_container(container, "Inactive Node", f"Node status was '{docker_status}' while majority concluded session.")
                 continue
             if "session_id" not in status:
                 logging.warning(f"Could not parse state for running container '{cid}'."); continue
@@ -258,7 +237,7 @@ class NodeMonitor:
                             self._restart_container(container, "Session ID Lag", details)
                         else: logging.warning(f"'{cid}' ID lag detected but not restarting (still in warm-up).")
                     else: logging.info(f"'{cid}' ID lagging for {int(elapsed.total_seconds())}s of {int(id_lag_threshold.total_seconds())}s.")
-
+    
     def _print_status_header(self, now: datetime) -> None:
         uptime, is_warmed_up = timedelta(seconds=int((now - self.start_time).total_seconds())), (now - self.start_time).total_seconds() >= WARMUP_SECONDS
         warmup_status = "ACTIVE" if is_warmed_up else f"WARMING UP ({int(uptime.total_seconds())}/{WARMUP_SECONDS}s)"
@@ -266,8 +245,7 @@ class NodeMonitor:
         print(header)
 
     def _handle_telegram_command(self, message: Dict) -> None:
-        text = message.get("text", "").strip()
-        parts = text.split()
+        text, parts = message.get("text", "").strip(), message.get("text", "").strip().split()
         command = parts[0].lower()
         logging.info(f"Received command from Telegram: {text}")
         if command in ["/start", "/stop", "/restart", "/logs"]:
@@ -281,13 +259,12 @@ class NodeMonitor:
                 elif command == "/logs":
                     num_lines_str = parts[2] if len(parts) > 2 else "20"
                     if not num_lines_str.isdigit(): self.notifier.send_command_response("Error: Line count must be a number."); return
-                    num_lines, logs = int(num_lines_str), container.logs(tail=int(num_lines_str)).decode("utf-8", "ignore")
+                    logs = container.logs(tail=int(num_lines_str)).decode("utf-8", "ignore")
                     if len(logs) > 4000: logs = "...\n" + logs[-4000:]
-                    self.notifier.send_command_response(f"Last {num_lines} lines of logs for <code>{cid}</code>:\n<pre>{logs}</pre>")
+                    self.notifier.send_command_response(f"Last {int(num_lines_str)} lines of logs for <code>{cid}</code>:\n<pre>{logs}</pre>")
             except docker.errors.NotFound: self.notifier.send_command_response(f"Error: Container <code>{cid}</code> not found.")
             except Exception as e: self.notifier.send_command_response(MSG_CMD_ERROR.format(error=str(e)))
             return
-        
         response = ""
         if command == "/stagnation":
             if len(parts) > 1:
@@ -308,7 +285,8 @@ class NodeMonitor:
             stagnation_status, stagnation_time, num_containers = "ENABLED" if self.config.get("stagnation_alert_enabled") else "DISABLED", self.config.get("stagnation_threshold_minutes"), len(self.config.get("containers", []))
             response = (f"<b>Watcher Status</b>\n- Monitoring {num_containers} containers.\n- Stagnation Alerts: <b>{stagnation_status}</b>\n- Stagnation Threshold: <b>{stagnation_time} minutes</b>")
         elif command == "/help": self.notifier.send_help_response(); return
-        else: self.notifier.send_unknown_command_response(); return
+        else:
+            self.notifier.send_unknown_command_response(); return
         self.notifier.send_command_response(response)
     
     def _check_for_majority_stagnation(self, now: datetime, majority_pair: Tuple[int, int]) -> None:
