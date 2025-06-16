@@ -24,5 +24,6 @@
   "reputation_check_enabled": true,
   "reputation_api_base_url": "https://lb-be-5.cortensor.network/session-reputation/",
   "reputation_check_window": 20,
-  "reputation_failure_threshold": 5
+  "reputation_failure_threshold": 5,
+  "reputation_restart_cooldown_minutes": 30
 }
