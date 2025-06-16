@@ -1,6 +1,7 @@
 import logging
 import sys
-from pathlib import Paths
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 from app.config import load_and_validate_config
