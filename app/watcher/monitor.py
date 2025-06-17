@@ -167,7 +167,7 @@ class NodeMonitor:
         while True:
             try:
                 # PASTIKAN BARIS INI TIDAK ADA TANDA '#' DI DEPANNYA
-                os.system("clear || cls")
+                # os.system("clear")
                 
                 now_utc = datetime.now(timezone.utc)
                 self._print_status_header(now_utc)
