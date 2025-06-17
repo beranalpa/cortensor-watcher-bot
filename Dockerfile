@@ -2,10 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# Salin file-file konfigurasi dan dependensi terlebih dahulu
+COPY requirements.txt .
+COPY config.json .
 
-COPY ./app /app/app
+# Install semua dependensi Python
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Salin sisa kode sumber aplikasi
+COPY ./app ./app
 COPY main.py .
 
 # Jalankan bot saat kontainer dimulai
