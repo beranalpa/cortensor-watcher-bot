@@ -2,9 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Salin file-file konfigurasi dan dependensi terlebih dahulu
-COPY requirements.txt .
-COPY config.json .
+COPY requirements.txt config.json .env ./
 
 # Install semua dependensi Python
 RUN pip install --no-cache-dir -r requirements.txt
