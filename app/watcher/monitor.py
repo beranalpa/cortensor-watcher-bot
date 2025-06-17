@@ -32,6 +32,11 @@ class NodeMonitor:
         )
         self.notifier.start_update_listener(self._handle_telegram_command)
 
+        # --- MODIFIED SECTION: Ensure state directory exists ---
+        # Make the bot smart enough to create its own state directory
+        STATE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # --- END OF MODIFIED SECTION ---
+
         self.container_states: Dict[str, Dict[str, Any]] = {}
         self._load_state() 
 
@@ -52,41 +57,31 @@ class NodeMonitor:
         if not WATCHER_LOG_FILE.exists():
             WATCHER_LOG_FILE.touch()
 
-    # --- START OF MODIFIED SECTION ---
-
     def _load_state(self):
-        """Loads the last known state from the state file."""
         try:
             if STATE_FILE_PATH.exists():
                 logging.info(f"Loading previous state from {STATE_FILE_PATH}...")
                 with STATE_FILE_PATH.open("r") as f:
-                    raw_state = json.load(f)
-                
-                self.container_states = {}
-                for cid, state_data in raw_state.items():
-                    # Convert timestamp strings back to datetime objects
+                    self.container_states = json.load(f)
+                for state_data in self.container_states.values():
                     for key in ["state_deviation_start_time", "id_lag_start_time"]:
                         if state_data.get(key):
                             state_data[key] = datetime.fromisoformat(state_data[key])
-                    self.container_states[cid] = state_data
-
         except Exception as e:
-            logging.error(f"Could not load or parse state file, starting fresh. Error: {e}")
+            logging.error(f"Could not load state file, starting fresh. Error: {e}")
             self.container_states = {}
 
     def _save_state(self):
-        """Saves the current state to the state file."""
         try:
-            # Create a deep copy to serialize without affecting live state
             serializable_state = json.loads(json.dumps(self.container_states, default=str))
-
             with STATE_FILE_PATH.open("w") as f:
                 json.dump(serializable_state, f, indent=2)
             logging.info(f"Successfully saved state to {STATE_FILE_PATH}")
         except Exception as e:
             logging.error(f"Could not save state file. Error: {e}")
 
-    # --- END OF MODIFIED SECTION ---
+    # ... (Sisa kode di file ini SAMA PERSIS seperti versi lengkap terakhir) ...
+    # ... (The rest of the code in this file is EXACTLY THE SAME as the last full version) ...
 
     def _connect_to_docker(self) -> docker.DockerClient:
         try:
@@ -102,7 +97,6 @@ class NodeMonitor:
         cid = container.name
         now_utc = datetime.now(timezone.utc)
         logging.warning(f"Restarting container '{cid}'. Reason: {reason}. {details}")
-        
         timestamp_str = now_utc.strftime("%Y%m%dT%H%M%S")
         log_filename = f"{cid}_{reason.lower().replace(' ', '_')}_{timestamp_str}.log"
         log_path = LOG_DIR / log_filename
@@ -111,22 +105,17 @@ class NodeMonitor:
             log_path.write_text(log_content, encoding="utf-8")
         except Exception as e:
             logging.error(f"Failed to write restart log for '{cid}': {e}")
-
         event_log_entry = (f"{now_utc.isoformat()} | RESTART | {cid} | {reason} | {details}\n")
-        with WATCHER_LOG_FILE.open("a", encoding="utf-8") as f:
-            f.write(event_log_entry)
-
+        with WATCHER_LOG_FILE.open("a", encoding="utf-8") as f: f.write(event_log_entry)
         self.notifier.send_restart_alert(cid=cid, reason=reason, details=details, timestamp=now_utc.strftime('%Y-%m-%d %H:%M:%S UTC'))
         
         if cid in self.container_states:
             state_info = self.container_states[cid]
-            state_info["state_deviation_start_time"] = None
-            state_info["id_lag_start_time"] = None
+            state_info["state_deviation_start_time"], state_info["id_lag_start_time"] = None, None
             if reason == "Reputation Failure" and failed_tasks_info:
                 state_info["ignored_failures_at"] = failed_tasks_info
-                logging.info(f"Ignoring failures for '{cid}' until new failures appear.")
+                logging.info(f"Ignoring {len(failed_tasks_info.get('precommit', []))} precommit and {len(failed_tasks_info.get('commit', []))} commit failures for '{cid}'.")
             self._save_state()
-
         try:
             container.restart(timeout=30)
             logging.info(f"Restart command sent successfully to '{cid}'.")
@@ -144,47 +133,34 @@ class NodeMonitor:
         for cid, address in node_addresses.items():
             state_info = self.container_states.get(cid)
             if not (state_info and state_info.get("warmed_up")): continue
-
             api_url = f"{base_url}/{address}"
             try:
                 container = self.client.containers.get(cid)
                 response = requests.get(api_url, timeout=10)
                 if response.status_code != 200:
-                    logging.warning(f"Reputation API for '{cid}' returned status {response.status_code}.")
-                    continue
-                
+                    logging.warning(f"Reputation API for '{cid}' returned status {response.status_code}."); continue
                 data = response.json()
-                
                 for stage in ["precommit", "commit"]:
                     stage_data = data.get(stage, {})
                     all_ts, success_ts = stage_data.get("all_timestamps", []), stage_data.get("success_timestamps", [])
                     if not all_ts: continue
-
-                    recent_tasks = set(all_ts[-window:])
-                    successful_tasks = set(success_ts)
+                    recent_tasks, successful_tasks = set(all_ts[-window:]), set(success_ts)
                     current_failures = recent_tasks - successful_tasks
                     failure_count = len(current_failures)
-
                     ignored_failures_list = state_info.get("ignored_failures_at", {}).get(stage, [])
                     ignored_failures = set(ignored_failures_list)
-
                     if failure_count < threshold and ignored_failures:
                         logging.info(f"Node '{cid}' ({stage}) is now healthy. Clearing ignored failures list.")
                         state_info.get("ignored_failures_at", {}).pop(stage, None)
                         self._save_state()
                         ignored_failures.clear()
-
                     if failure_count > 0:
                         logging.info(f"Reputation Check for '{cid}' ({stage}): Found {failure_count} total failed tasks. Ignoring {len(ignored_failures)} known failures.")
-                    
                     new_unseen_failures = current_failures - ignored_failures
-                    
                     if failure_count >= threshold and len(new_unseen_failures) > 0:
                         details = f"Node had {failure_count} total failed {stage} tasks, including {len(new_unseen_failures)} new failure(s)."
-                        
                         failed_tasks_info_to_save = state_info.get("ignored_failures_at", {})
                         failed_tasks_info_to_save[stage] = list(current_failures)
-
                         self._restart_container(container, "Reputation Failure", details, failed_tasks_info=failed_tasks_info_to_save)
                         break 
                     elif failure_count >= threshold:
@@ -322,7 +298,6 @@ class NodeMonitor:
             except docker.errors.NotFound: self.notifier.send_command_response(f"Error: Container <code>{cid}</code> not found.")
             except Exception as e: self.notifier.send_command_response(MSG_CMD_ERROR.format(error=str(e)))
             return
-        
         response = ""
         if command == "/stagnation":
             if len(parts) > 1:
@@ -346,7 +321,7 @@ class NodeMonitor:
         else:
             self.notifier.send_unknown_command_response(); return
         self.notifier.send_command_response(response)
-    
+
     def _check_for_majority_stagnation(self, now: datetime, majority_pair: Tuple[int, int]) -> None:
         if not self.config.get("stagnation_alert_enabled", False): return
         if self.last_seen_majority_pair != majority_pair:
