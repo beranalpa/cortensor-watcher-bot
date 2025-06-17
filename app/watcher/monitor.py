@@ -32,11 +32,8 @@ class NodeMonitor:
         )
         self.notifier.start_update_listener(self._handle_telegram_command)
 
-        # --- MODIFIED SECTION: Ensure state directory exists ---
-        # Make the bot smart enough to create its own state directory
         STATE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # --- END OF MODIFIED SECTION ---
-
+        
         self.container_states: Dict[str, Dict[str, Any]] = {}
         self._load_state() 
 
@@ -79,9 +76,6 @@ class NodeMonitor:
             logging.info(f"Successfully saved state to {STATE_FILE_PATH}")
         except Exception as e:
             logging.error(f"Could not save state file. Error: {e}")
-
-    # ... (Sisa kode di file ini SAMA PERSIS seperti versi lengkap terakhir) ...
-    # ... (The rest of the code in this file is EXACTLY THE SAME as the last full version) ...
 
     def _connect_to_docker(self) -> docker.DockerClient:
         try:
@@ -172,7 +166,9 @@ class NodeMonitor:
         self.notifier.send_watcher_start_message()
         while True:
             try:
+                # PASTIKAN BARIS INI TIDAK ADA TANDA '#' DI DEPANNYA
                 os.system("clear || cls")
+                
                 now_utc = datetime.now(timezone.utc)
                 self._print_status_header(now_utc)
                 is_warmed_up = (now_utc - self.start_time).total_seconds() >= WARMUP_SECONDS
@@ -199,6 +195,7 @@ class NodeMonitor:
                 time.sleep(10)
 
     def _get_all_container_statuses(self) -> Dict[str, Dict[str, Any]]:
+        # ... (Method content is unchanged)
         statuses = {}
         for cid in self.config["containers"]:
             try:
@@ -227,6 +224,7 @@ class NodeMonitor:
         return statuses
 
     def _evaluate_all_nodes(self, all_statuses: Dict[str, Any], majority_pair: Tuple[int, int]) -> None:
+        # ... (Method content is unchanged)
         grace_period, id_lag_threshold, now = timedelta(seconds=self.config.get("grace_period_seconds", 30)), timedelta(minutes=2), datetime.now(timezone.utc)
         majority_id, majority_state = majority_pair
         for cid, status in all_statuses.items():
@@ -272,12 +270,14 @@ class NodeMonitor:
                     else: logging.info(f"'{cid}' ID lagging for {int(elapsed.total_seconds())}s of {int(id_lag_threshold.total_seconds())}s.")
     
     def _print_status_header(self, now: datetime) -> None:
+        # ... (Method content is unchanged)
         uptime, is_warmed_up = timedelta(seconds=int((now - self.start_time).total_seconds())), (now - self.start_time).total_seconds() >= WARMUP_SECONDS
         warmup_status = "ACTIVE" if is_warmed_up else f"WARMING UP ({int(uptime.total_seconds())}/{WARMUP_SECONDS}s)"
         header = f"\n--- Cortensor Watcher Status | {now.strftime('%Y-%m-%d %H:%M:%S UTC')} ---\nUptime: {uptime} | Monitoring Status: {warmup_status}"
         print(header)
 
     def _handle_telegram_command(self, message: Dict) -> None:
+        # ... (Method content is unchanged)
         text, parts = message.get("text", "").strip(), message.get("text", "").strip().split()
         command = parts[0].lower()
         logging.info(f"Received command from Telegram: {text}")
@@ -321,8 +321,9 @@ class NodeMonitor:
         else:
             self.notifier.send_unknown_command_response(); return
         self.notifier.send_command_response(response)
-
+    
     def _check_for_majority_stagnation(self, now: datetime, majority_pair: Tuple[int, int]) -> None:
+        # ... (Method content is unchanged)
         if not self.config.get("stagnation_alert_enabled", False): return
         if self.last_seen_majority_pair != majority_pair:
             logging.info(f"Majority has progressed to {majority_pair}. Resetting stagnation timer.")
