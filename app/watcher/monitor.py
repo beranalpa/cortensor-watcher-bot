@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -5,6 +6,7 @@ import threading
 import time
 from collections import Counter
 from datetime import datetime, timezone, timedelta
+from pathlib import Path  # <-- PERBAIKAN: Import yang hilang ditambahkan di sini
 from typing import Any, Dict, Optional, Tuple
 
 import docker
@@ -17,7 +19,13 @@ from app.constants import (LOG_DIR, MSG_CMD_ERROR, MSG_CMD_HELP,
                            PATTERN_TRACEBACK, RE_LOG_STATE, WARMUP_SECONDS,
                            WATCHER_LOG_FILE)
 
+# Path for the persistent state file
+STATE_FILE_PATH = Path("./state_data/watcher_state.json")
+
 class NodeMonitor:
+    """
+    The main class for monitoring and remediating Dockerized nodes.
+    """
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.client = self._connect_to_docker()
@@ -27,15 +35,21 @@ class NodeMonitor:
             chat_id=self.config.get("telegram_chat_id")
         )
         self.notifier.start_update_listener(self._handle_telegram_command)
-        self.container_states: Dict[str, Dict[str, Any]] = {
-            cid: {
-                "state_deviation_start_time": None,
-                "id_lag_start_time": None,
-                "warmed_up": False,
-                "reputation_cooldown_until": None
-            }
-            for cid in self.config["containers"]
-        }
+
+        # Initialize state
+        self.container_states: Dict[str, Dict[str, Any]] = {}
+        self._load_state() # Load previous state from disk
+
+        # Ensure all configured containers have a state entry
+        for cid in self.config.get("containers", []):
+            if cid not in self.container_states:
+                self.container_states[cid] = {
+                    "state_deviation_start_time": None,
+                    "id_lag_start_time": None,
+                    "warmed_up": False,
+                    "ignored_failures_at": {} # Will store {stage: [timestamps]}
+                }
+        
         self.last_seen_majority_pair: Optional[Tuple[int, int]] = None
         self.majority_stagnation_start_time: Optional[datetime] = None
         self.alert_sent_for_stagnant_pair: Optional[Tuple[int, int]] = None
@@ -43,6 +57,45 @@ class NodeMonitor:
         if not WATCHER_LOG_FILE.exists():
             WATCHER_LOG_FILE.touch()
 
+    def _load_state(self):
+        """Loads the last known state from the state file."""
+        try:
+            if STATE_FILE_PATH.exists():
+                logging.info(f"Loading previous state from {STATE_FILE_PATH}...")
+                with STATE_FILE_PATH.open("r") as f:
+                    # Load the raw state
+                    raw_state = json.load(f)
+                    # Re-initialize self.container_states to ensure structure is correct
+                    self.container_states = {}
+                    for cid, state_data in raw_state.items():
+                        # Convert timestamp lists back to sets for ignored_failures_at
+                        if "ignored_failures_at" in state_data:
+                            for stage, timestamps in state_data["ignored_failures_at"].items():
+                                state_data["ignored_failures_at"][stage] = set(timestamps)
+                        self.container_states[cid] = state_data
+        except Exception as e:
+            logging.error(f"Could not load or parse state file, starting fresh. Error: {e}")
+            self.container_states = {}
+
+    def _save_state(self):
+        """Saves the current state to the state file."""
+        try:
+            # Create a serializable copy of the state
+            serializable_state = {}
+            for cid, state_data in self.container_states.items():
+                state_copy = state_data.copy()
+                # Convert sets to lists for JSON serialization
+                if "ignored_failures_at" in state_copy and isinstance(state_copy["ignored_failures_at"], dict):
+                    for stage, timestamps in state_copy["ignored_failures_at"].items():
+                        state_copy["ignored_failures_at"][stage] = list(timestamps)
+                serializable_state[cid] = state_copy
+
+            with STATE_FILE_PATH.open("w") as f:
+                json.dump(serializable_state, f, indent=2)
+            logging.info(f"Successfully saved state to {STATE_FILE_PATH}")
+        except Exception as e:
+            logging.error(f"Could not save state file. Error: {e}")
+            
     def _connect_to_docker(self) -> docker.DockerClient:
         try:
             client = docker.from_env()
@@ -53,11 +106,13 @@ class NodeMonitor:
             logging.critical(f"Cannot connect to Docker daemon: {e}")
             sys.exit(1)
 
-    def _restart_container(self, container: Container, reason: str, details: str = "") -> None:
+    def _restart_container(self, container: Container, reason: str, details: str = "", failed_tasks_info: Optional[Dict] = None) -> None:
         cid = container.name
         now_utc = datetime.now(timezone.utc)
-        timestamp_str = now_utc.strftime("%Y%m%dT%H%M%S")
         logging.warning(f"Restarting container '{cid}'. Reason: {reason}. {details}")
+        
+        # Log saving logic
+        timestamp_str = now_utc.strftime("%Y%m%dT%H%M%S")
         log_filename = f"{cid}_{reason.lower().replace(' ', '_')}_{timestamp_str}.log"
         log_path = LOG_DIR / log_filename
         try:
@@ -65,12 +120,9 @@ class NodeMonitor:
             log_path.write_text(log_content, encoding="utf-8")
         except Exception as e:
             logging.error(f"Failed to write restart log for '{cid}': {e}")
-        event_log_entry = (
-            f"{now_utc.isoformat()} | RESTART | Container: {cid} | Reason: {reason} | "
-            f"Details: {details} | Logfile: {log_path.name}\n"
-        )
-        with WATCHER_LOG_FILE.open("a", encoding="utf-8") as f:
-            f.write(event_log_entry)
+        event_log_entry = (f"{now_utc.isoformat()} | RESTART | ...\n")
+        with WATCHER_LOG_FILE.open("a") as f: f.write(event_log_entry)
+
         self.notifier.send_restart_alert(
             cid=cid, reason=reason, details=details,
             timestamp=now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
@@ -80,11 +132,11 @@ class NodeMonitor:
             state_info = self.container_states[cid]
             state_info["state_deviation_start_time"] = None
             state_info["id_lag_start_time"] = None
-            if reason == "Reputation Failure":
-                cooldown_minutes = self.config.get("reputation_restart_cooldown_minutes", 30)
-                cooldown_end_time = now_utc + timedelta(minutes=cooldown_minutes)
-                state_info["reputation_cooldown_until"] = cooldown_end_time
-                logging.info(f"DEBUG: Setting cooldown for '{cid}' until {cooldown_end_time.isoformat()}")
+            if reason == "Reputation Failure" and failed_tasks_info:
+                state_info["ignored_failures_at"] = failed_tasks_info
+                logging.info(f"Ignoring failures for '{cid}' until new failures appear.")
+            self._save_state()
+
         try:
             container.restart(timeout=30)
             logging.info(f"Restart command sent successfully to '{cid}'.")
@@ -99,42 +151,57 @@ class NodeMonitor:
         window = self.config.get("reputation_check_window", 20)
         threshold = self.config.get("reputation_failure_threshold", 5)
         node_addresses = self.config.get("node_addresses", {})
-        now = datetime.now(timezone.utc)
+        
         for cid, address in node_addresses.items():
             state_info = self.container_states.get(cid)
-            if not state_info: continue
-            cooldown_until = state_info.get("reputation_cooldown_until")
-            if cooldown_until:
-                is_in_cooldown = now < cooldown_until
-                logging.info(f"DEBUG: Checking cooldown for '{cid}'. Now: {now.isoformat()}. Cooldown until: {cooldown_until.isoformat()}. In cooldown: {is_in_cooldown}")
-            if cooldown_until and now < cooldown_until:
-                logging.info(f"Skipping reputation check for '{cid}', it is in cooldown.")
-                continue
+            if not (state_info and state_info.get("warmed_up")): continue
+
             api_url = f"{base_url}/{address}"
             try:
                 container = self.client.containers.get(cid)
-                if not state_info.get("warmed_up", False): continue
                 response = requests.get(api_url, timeout=10)
-                if response.status_code == 404:
-                    logging.warning(f"Reputation API for '{cid}' returned 404. URL: {api_url}")
+                if response.status_code != 200:
+                    logging.warning(f"Reputation API for '{cid}' returned status {response.status_code}.")
                     continue
-                response.raise_for_status()
+                
                 data = response.json()
+                
                 for stage in ["precommit", "commit"]:
                     stage_data = data.get(stage, {})
                     all_ts, success_ts = stage_data.get("all_timestamps", []), stage_data.get("success_timestamps", [])
                     if not all_ts: continue
-                    recent, successful = set(all_ts[-window:]), set(success_ts)
-                    failed_count = len(recent - successful)
-                    if failed_count > 0:
-                        logging.info(f"Reputation Check for '{cid}' ({stage}): Found {failed_count} failed tasks in last {len(recent)}.")
-                    if failed_count >= threshold:
-                        details = f"Node had {failed_count} failed {stage} tasks in the last {len(recent)} attempts."
-                        self._restart_container(container, "Reputation Failure", details)
-                        break
+
+                    recent_tasks = set(all_ts[-window:])
+                    successful_tasks = set(success_ts)
+                    current_failures = recent_tasks - successful_tasks
+                    failure_count = len(current_failures)
+
+                    ignored_failures = state_info.get("ignored_failures_at", {}).get(stage, set())
+
+                    if failure_count < threshold and ignored_failures:
+                        logging.info(f"Node '{cid}' ({stage}) is now healthy. Clearing ignored failures list.")
+                        state_info.get("ignored_failures_at", {}).pop(stage, None)
+                        self._save_state()
+                        ignored_failures.clear()
+
+                    if failure_count > 0:
+                        logging.info(f"Reputation Check for '{cid}' ({stage}): Found {failure_count} failed tasks. Ignoring {len(ignored_failures)} known failures.")
+
+                    new_unseen_failures = current_failures - ignored_failures
+
+                    if failure_count >= threshold and len(new_unseen_failures) > 0:
+                        details = f"Node had {failure_count} total failed {stage} tasks, including {len(new_unseen_failures)} new failure(s)."
+                        
+                        failed_tasks_info_to_save = state_info.get("ignored_failures_at", {})
+                        failed_tasks_info_to_save[stage] = list(current_failures)
+
+                        self._restart_container(container, "Reputation Failure", details, failed_tasks_info=failed_tasks_info_to_save)
+                        break 
+                    elif failure_count >= threshold:
+                        logging.info(f"Ignoring known historical failures for '{cid}' ({stage}). No new failures detected.")
             except Exception as e:
                 logging.error(f"Error during reputation check for '{cid}': {e}")
-
+    
     def run(self) -> None:
         self.notifier.send_watcher_start_message()
         while True:
@@ -143,8 +210,9 @@ class NodeMonitor:
                 now_utc = datetime.now(timezone.utc)
                 self._print_status_header(now_utc)
                 is_warmed_up = (now_utc - self.start_time).total_seconds() >= WARMUP_SECONDS
-                for state in self.container_states.values():
-                    state["warmed_up"] = is_warmed_up
+                for cid in self.config.get("containers", []):
+                    if cid in self.container_states:
+                        self.container_states[cid]["warmed_up"] = is_warmed_up
                 if self.config.get("reputation_check_enabled"): self._check_reputation()
                 all_statuses = self._get_all_container_statuses()
                 running_nodes = {cid: status for cid, status in all_statuses.items() if status.get("is_running") and "session_id" in status}
@@ -172,8 +240,8 @@ class NodeMonitor:
                 container = self.client.containers.get(cid)
                 status_data = {"container": container, "is_running": container.status == "running", "docker_status": container.status}
                 if not status_data["is_running"]: statuses[cid] = status_data; continue
-                log_lines = container.logs(tail=self.config["tail_lines"]).decode("utf-8", "ignore").splitlines()
-                if self.container_states[cid]["warmed_up"]:
+                log_lines = container.logs(tail=self.config.get("tail_lines", 500)).decode("utf-8", "ignore").splitlines()
+                if self.container_states.get(cid, {}).get("warmed_up", False):
                     if any(PATTERN_TRACEBACK in ln for ln in log_lines):
                         self._restart_container(container, "Python Traceback", "A Python 'Traceback' was detected.")
                         continue
@@ -194,7 +262,7 @@ class NodeMonitor:
         return statuses
 
     def _evaluate_all_nodes(self, all_statuses: Dict[str, Any], majority_pair: Tuple[int, int]) -> None:
-        grace_period, id_lag_threshold, now = timedelta(seconds=self.config["grace_period_seconds"]), timedelta(minutes=2), datetime.now(timezone.utc)
+        grace_period, id_lag_threshold, now = timedelta(seconds=self.config.get("grace_period_seconds", 30)), timedelta(minutes=2), datetime.now(timezone.utc)
         majority_id, majority_state = majority_pair
         for cid, status in all_statuses.items():
             container, docker_status = status.get("container"), status.get("docker_status", "unknown")
@@ -265,6 +333,7 @@ class NodeMonitor:
             except docker.errors.NotFound: self.notifier.send_command_response(f"Error: Container <code>{cid}</code> not found.")
             except Exception as e: self.notifier.send_command_response(MSG_CMD_ERROR.format(error=str(e)))
             return
+        
         response = ""
         if command == "/stagnation":
             if len(parts) > 1:
