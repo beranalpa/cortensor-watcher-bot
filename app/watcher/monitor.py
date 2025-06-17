@@ -31,14 +31,26 @@ class NodeMonitor:
             chat_id=self.config.get("telegram_chat_id")
         )
         self.notifier.start_update_listener(self._handle_telegram_command)
+
+        # Initialize state
         self.container_states: Dict[str, Dict[str, Any]] = {}
-        self._load_state()
+        self._load_state() 
+
+        # Ensure all configured containers have a default state entry
         for cid in self.config.get("containers", []):
             if cid not in self.container_states:
                 self.container_states[cid] = {
-                    "state_deviation_start_time": None, "id_lag_start_time": None,
-                    "warmed_up": False, "ignored_failures_at": {}
+                    "state_deviation_start_time": None,
+                    "id_lag_start_time": None,
+                    "warmed_up": False,
+                    "ignored_failures_at": {}
                 }
+        
+        # --- FIX: Re-added missing state initializations ---
+        self.last_seen_majority_pair: Optional[Tuple[int, int]] = None
+        self.majority_stagnation_start_time: Optional[datetime] = None
+        self.alert_sent_for_stagnant_pair: Optional[Tuple[int, int]] = None
+        
         LOG_DIR.mkdir(exist_ok=True)
         if not WATCHER_LOG_FILE.exists():
             WATCHER_LOG_FILE.touch()
@@ -122,16 +134,12 @@ class NodeMonitor:
                     stage_data = data.get(stage, {})
                     all_ts, success_ts = stage_data.get("all_timestamps", []), stage_data.get("success_timestamps", [])
                     if not all_ts: continue
-                    recent_tasks = set(all_ts[-window:])
-                    successful_tasks = set(success_ts)
+                    recent_tasks, successful_tasks = set(all_ts[-window:]), set(success_ts)
                     current_failures = recent_tasks - successful_tasks
                     failure_count = len(current_failures)
-
-                    # --- START OF MODIFIED SECTION ---
-                    # Defensively cast the ignored list from state to a set right before use.
+                    
                     ignored_failures_list = state_info.get("ignored_failures_at", {}).get(stage, [])
                     ignored_failures = set(ignored_failures_list)
-                    # --- END OF MODIFIED SECTION ---
 
                     if failure_count < threshold and ignored_failures:
                         logging.info(f"Node '{cid}' ({stage}) is now healthy. Clearing ignored failures list.")
@@ -185,7 +193,6 @@ class NodeMonitor:
                 time.sleep(10)
 
     def _get_all_container_statuses(self) -> Dict[str, Dict[str, Any]]:
-        # ... (This method remains the same)
         statuses = {}
         for cid in self.config["containers"]:
             try:
@@ -214,7 +221,6 @@ class NodeMonitor:
         return statuses
 
     def _evaluate_all_nodes(self, all_statuses: Dict[str, Any], majority_pair: Tuple[int, int]) -> None:
-        # ... (This method remains the same)
         grace_period, id_lag_threshold, now = timedelta(seconds=self.config.get("grace_period_seconds", 30)), timedelta(minutes=2), datetime.now(timezone.utc)
         majority_id, majority_state = majority_pair
         for cid, status in all_statuses.items():
@@ -258,16 +264,14 @@ class NodeMonitor:
                             self._restart_container(container, "Session ID Lag", details)
                         else: logging.warning(f"'{cid}' ID lag detected but not restarting (still in warm-up).")
                     else: logging.info(f"'{cid}' ID lagging for {int(elapsed.total_seconds())}s of {int(id_lag_threshold.total_seconds())}s.")
-    
+
     def _print_status_header(self, now: datetime) -> None:
-        # ... (This method remains the same)
         uptime, is_warmed_up = timedelta(seconds=int((now - self.start_time).total_seconds())), (now - self.start_time).total_seconds() >= WARMUP_SECONDS
         warmup_status = "ACTIVE" if is_warmed_up else f"WARMING UP ({int(uptime.total_seconds())}/{WARMUP_SECONDS}s)"
         header = f"\n--- Cortensor Watcher Status | {now.strftime('%Y-%m-%d %H:%M:%S UTC')} ---\nUptime: {uptime} | Monitoring Status: {warmup_status}"
         print(header)
 
     def _handle_telegram_command(self, message: Dict) -> None:
-        # ... (This method remains the same)
         text, parts = message.get("text", "").strip(), message.get("text", "").strip().split()
         command = parts[0].lower()
         logging.info(f"Received command from Telegram: {text}")
@@ -311,9 +315,8 @@ class NodeMonitor:
         else:
             self.notifier.send_unknown_command_response(); return
         self.notifier.send_command_response(response)
-    
+
     def _check_for_majority_stagnation(self, now: datetime, majority_pair: Tuple[int, int]) -> None:
-        # ... (This method remains the same)
         if not self.config.get("stagnation_alert_enabled", False): return
         if self.last_seen_majority_pair != majority_pair:
             logging.info(f"Majority has progressed to {majority_pair}. Resetting stagnation timer.")
